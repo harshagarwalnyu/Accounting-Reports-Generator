@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+temp_data/
+*.tex
+*.pdf
+*.log
+*.aux
+*.out
+*.toc
+.pytest_cache/
