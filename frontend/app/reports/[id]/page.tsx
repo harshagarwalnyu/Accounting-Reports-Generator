@@ -7,7 +7,8 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
-import { motion } from "motion/react";
+import { Button } from "@/components/ui/button";
+import { Download } from "lucide-react";
 
 function AnimatedNumber({ value }: { value: number }) {
   // Simple static display for now, motion values could be applied here
@@ -53,36 +54,43 @@ export default function ReportViewer() {
   const financialPosition = data["Financial Position"] || {};
   
   // Prepare chart data
-  const chartData: any[] = [];
+  type ChartEntry = { name: string; category: string; current: number; prior: number };
+  const chartData: ChartEntry[] = [];
   if (financialPosition.Assets) {
-    Object.entries(financialPosition.Assets).forEach(([name, amounts]: any) => {
+    Object.entries(financialPosition.Assets).forEach(([name, amounts]) => {
+      const amt = amounts as { current: number; prior: number };
       chartData.push({
         name,
         category: "Assets",
-        current: amounts["Amount-25"] || 0,
-        prior: amounts["Amount-24"] || 0
+        current: amt.current || 0,
+        prior: amt.prior || 0
       });
     });
   }
   if (financialPosition["Liabilities & Equity"]) {
-    Object.entries(financialPosition["Liabilities & Equity"]).forEach(([name, amounts]: any) => {
+    Object.entries(financialPosition["Liabilities & Equity"]).forEach(([name, amounts]) => {
+      const amt = amounts as { current: number; prior: number };
       chartData.push({
         name,
         category: "Liabilities",
-        current: Math.abs(amounts["Amount-25"] || 0),
-        prior: Math.abs(amounts["Amount-24"] || 0)
+        current: Math.abs(amt.current || 0),
+        prior: Math.abs(amt.prior || 0)
       });
     });
   }
 
   return (
-    <div className="h-[calc(100vh-6rem)] -m-4">
-      {/* @ts-expect-error - shadcn types are currently mismatched */}
-      <ResizablePanelGroup direction="horizontal">
+    <div className="h-full flex flex-col">
+      <ResizablePanelGroup direction="horizontal" className="flex-1">
         <ResizablePanel defaultSize={50} minSize={30}>
           <div className="h-full overflow-y-auto p-6 space-y-6">
             <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold tracking-tight">Financial Dashboard</h2>
+              <h2 className="text-2xl font-bold tracking-tight text-gradient">Financial Dashboard</h2>
+              <a href={`${API_BASE_URL}/reports/${id}/pdf`} download={`Report_${id}.pdf`}>
+                <Button variant="outline" size="sm" className="bg-slate-900/50">
+                  <Download className="w-4 h-4 mr-2" /> Download PDF
+                </Button>
+              </a>
             </div>
             
             <div className="grid grid-cols-2 gap-4">
@@ -108,11 +116,11 @@ export default function ReportViewer() {
               </Card>
             </div>
 
-            <Card className="glass-card h-[400px]">
+            <Card className="glass-card">
               <CardHeader>
                 <CardTitle>Current vs Prior Year (AED)</CardTitle>
               </CardHeader>
-              <CardContent className="h-[300px]">
+              <CardContent className="h-80">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" vertical={false} />

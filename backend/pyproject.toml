@@ -1,7 +1,7 @@
 [project]
 name = "api"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Accounting Reports Generator API"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,9 +13,27 @@ dependencies = [
     "python-multipart>=0.0.22",
     "sse-starlette>=3.3.2",
     "uvicorn>=0.41.0",
+    "google-generativeai>=0.8.0",
+    "pypdf>=4.0.0",
+    "python-docx>=1.1.0",
+    "docxtpl>=0.16.0",
+    "pdfplumber>=0.11.0",
+    "lxml>=5.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
     "pytest>=8.0.0",
     "httpx>=0.27.0",
+    "ruff>=0.15.5",
 ]
 
 [tool.setuptools]
 py-modules = []
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

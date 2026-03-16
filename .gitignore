@@ -16,6 +16,8 @@ eggs/
 .eggs/
 /lib/
 /lib64/
+backend/lib/
+backend/lib64/
 parts/
 sdist/
 var/
@@ -169,3 +171,4 @@ frontend/.next/
 frontend/node_modules/
 temp_data/
 .temp_venv/
+.gemini/

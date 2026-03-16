@@ -32,12 +32,12 @@ export default function RootLayout({
         <Providers>
           <header className="border-b border-white/10 bg-background/50 backdrop-blur-md sticky top-0 z-40">
             <div className="container mx-auto px-4 h-16 flex items-center justify-between">
-              <div className="flex items-center gap-2">
+              <a href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
                 <div className="w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center border border-emerald-500/50">
                   <span className="text-emerald-500 font-bold">AR</span>
                 </div>
                 <h1 className="font-semibold tracking-tight">Accounting Reports</h1>
-              </div>
+              </a>
             </div>
           </header>
           <main className="flex-1 container mx-auto px-4 py-8">

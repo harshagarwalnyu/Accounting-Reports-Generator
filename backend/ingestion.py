@@ -1,152 +1,262 @@
-import pandas as pd
 import json
+import logging
 import os
+
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
 try:
     import ai_engine
 except ImportError:
     ai_engine = None
 
-def load_and_process_data(file_path, use_ai=False):
-    # Load the data
+# ── Column detection ──────────────────────────────────────────────────────────
+
+# Common column name patterns for each field
+_NAME_CANDIDATES = [
+    "Main Mapping",
+    "Account",
+    "Account Name",
+    "Description",
+    "Line Item",
+    "Particulars",
+    "Mapping",
+]
+_CY_CANDIDATES = [
+    "Amount-25",
+    "Amount_25",
+    "2025",
+    "CY",
+    "Current Year",
+    "Current",
+    "Amount (2025)",
+    "FY2025",
+    "Amount",
+]
+_PY_CANDIDATES = [
+    "Amount-24",
+    "Amount_24",
+    "2024",
+    "PY",
+    "Prior Year",
+    "Prior",
+    "Amount (2024)",
+    "FY2024",
+]
+_SUB_CANDIDATES = [
+    "Sub Mapping",
+    "Sub Category",
+    "Sub Account",
+    "Sub",
+]
+_CAT_CANDIDATES = [
+    "Category",
+    "Type",
+    "Classification",
+    "Group",
+]
+
+
+def _match_column(df_cols, candidates):
+    """Return first column name that matches a candidate (case-insensitive)."""
+    cols_lower = {c.lower(): c for c in df_cols}
+    for cand in candidates:
+        if cand in df_cols:
+            return cand
+        if cand.lower() in cols_lower:
+            return cols_lower[cand.lower()]
+    return None
+
+
+def _ai_detect_columns(df: pd.DataFrame) -> dict:
+    """Use Gemini to detect column purposes from a preview of the DataFrame."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return {}
+
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        from ai_engine import GEMINI_MODEL
+
+        model = genai.GenerativeModel(GEMINI_MODEL)
+
+        preview_rows = df.head(4).fillna("").to_dict(orient="records")
+        col_list = list(df.columns)
+
+        prompt = f"""You are analyzing an accounting trial balance Excel file.
+Column names: {col_list}
+First 4 rows sample:
+{json.dumps(preview_rows, default=str, indent=2)}
+
+Identify which column serves each role:
+- name_col: account names or line item descriptions
+- cy_col: current year monetary amounts (most recent year)
+- py_col: prior year monetary amounts (if present)
+- sub_col: sub-category or sub-mapping (if present)
+- category_col: account category or type (if present)
+
+Return ONLY valid JSON like:
+{{"name_col": "...", "cy_col": "...", "py_col": null, "sub_col": null, "category_col": null}}"""
+
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "response_mime_type": "application/json",
+                "temperature": 0,
+            },
+        )
+        return json.loads(response.text.strip())
+    except Exception as e:
+        logger.error(f"AI column detection failed: {e}")
+        return {}
+
+
+def detect_columns(df: pd.DataFrame) -> dict:
+    """
+    Auto-detect Excel column mapping.
+    Returns dict with keys: name_col, cy_col, py_col, sub_col, category_col.
+    """
+    cols = list(df.columns)
+    mapping = {
+        "name_col": _match_column(cols, _NAME_CANDIDATES),
+        "cy_col": _match_column(cols, _CY_CANDIDATES),
+        "py_col": _match_column(cols, _PY_CANDIDATES),
+        "sub_col": _match_column(cols, _SUB_CANDIDATES),
+        "category_col": _match_column(cols, _CAT_CANDIDATES),
+    }
+
+    # If name or cy not found, try AI
+    if not mapping["name_col"] or not mapping["cy_col"]:
+        ai = _ai_detect_columns(df)
+        for key in mapping:
+            if not mapping[key] and ai.get(key):
+                mapping[key] = ai[key]
+
+    return mapping
+
+
+# ── Core processing ───────────────────────────────────────────────────────────
+
+
+def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
     try:
         df = pd.read_excel(file_path)
     except Exception as e:
-        print(f"Error loading Excel: {e}")
+        logger.error(f"Error loading Excel: {e}")
         return None
 
-    # Validate columns
-    required_cols = ['Main Mapping', 'Amount-25', 'Amount-24']
-    if not all(col in df.columns for col in required_cols):
-        missing = [c for c in required_cols if c not in df.columns]
-        print(f"Missing required columns in Excel: {missing}")
+    if df.empty:
+        logger.error("Excel file is empty")
         return None
 
-    # Filter out rows where Main Mapping is empty
-    df = df[df['Main Mapping'].notna() & (df['Main Mapping'].astype(str).str.strip() != '')]
+    col_map = detect_columns(df)
+    name_col = col_map.get("name_col")
+    cy_col = col_map.get("cy_col")
+    py_col = col_map.get("py_col")
+    sub_col = col_map.get("sub_col")
 
-    # Convert amounts to numeric, coercing errors to 0 just in case
-    df['Amount-25'] = pd.to_numeric(df['Amount-25'], errors='coerce').fillna(0)
-    df['Amount-24'] = pd.to_numeric(df['Amount-24'], errors='coerce').fillna(0)
+    if not name_col or not cy_col:
+        logger.error(
+            f"Cannot identify required columns. Detected: {col_map}. "
+            f"Available: {list(df.columns)}"
+        )
+        return None
 
-    # --- SOTA: AI-Enhanced Mapping ---
-    if use_ai and ai_engine and os.environ.get("OPENAI_API_KEY"):
-        unique_mappings = df['Main Mapping'].unique().tolist()
+    # Filter rows with empty account names
+    df = df[df[name_col].notna() & (df[name_col].astype(str).str.strip() != "")]
+
+    # Coerce amounts to numeric
+    df[cy_col] = pd.to_numeric(df[cy_col], errors="coerce").fillna(0)
+    if py_col and py_col in df.columns:
+        df[py_col] = pd.to_numeric(df[py_col], errors="coerce").fillna(0)
+
+    # AI account classification
+    if use_ai and ai_engine and os.environ.get("GEMINI_API_KEY"):
+        unique_mappings = df[name_col].unique().tolist()
         ai_mappings = ai_engine.ai_classify_accounts(unique_mappings)
-        mapping_dict = {m.account_name: m.category for m in ai_mappings}
+        ai_map = {m.account_name: m.category for m in ai_mappings}
     else:
-        mapping_dict = {}
+        ai_map = {}
 
-    # 1. Financial Position Dictionary
-    grouped = df.groupby('Main Mapping')[['Amount-25', 'Amount-24']].sum()
-    
-    financial_position = {
-        "Assets": {},
-        "Liabilities & Equity": {}
-    }
+    # Group by account name
+    agg_cols = {cy_col: "sum"}
+    if py_col and py_col in df.columns:
+        agg_cols[py_col] = "sum"
+    grouped = df.groupby(name_col).agg(agg_cols)
+
+    financial_position = {"Assets": {}, "Liabilities & Equity": {}}
 
     import re
 
     for mapping, row in grouped.iterrows():
-        # P&L accounts belong to the income statement, not the financial position;
-        # without this they fall through the sign heuristic into Assets/Liabilities.
-        if re.search(r"revenue|expense", str(mapping), re.IGNORECASE):
-            continue
-        entry = {
-            "Amount-25": float(row['Amount-25']),
-            "Amount-24": float(row['Amount-24'])
-        }
-        
-        # Use AI classification if available, otherwise fallback to sign heuristic
-        category = mapping_dict.get(mapping)
-        if category == "Asset":
-             financial_position["Assets"][mapping] = entry
-        elif category in ["Liability", "Equity"]:
-             financial_position["Liabilities & Equity"][mapping] = entry
-        else:
-             # Heuristic fallback
-             if row['Amount-25'] >= 0:
-                  financial_position["Assets"][mapping] = entry
-             else:
-                  financial_position["Liabilities & Equity"][mapping] = entry
+        cy_val = float(row[cy_col])
+        py_val = float(row[py_col]) if py_col and py_col in row else 0.0
 
-    # 2. Notes Dictionary
-    # For "General and administrative expenses", group by Sub Mapping
-    gaa_expenses = df[df['Main Mapping'] == "General and administrative expenses"]
-    unique_subs = gaa_expenses['Sub Mapping'].unique()
-    
+        entry = {"current": cy_val, "prior": py_val}
+
+        mapping_lower = str(mapping).lower()
+        # Exclude P&L items from Statement of Financial Position if they match keywords
+        if any(
+            kw in mapping_lower for kw in ["revenue", "expense", "income", "cost of"]
+        ):
+            continue
+
+        category = ai_map.get(mapping)
+        if category == "Asset":
+            financial_position["Assets"][mapping] = entry
+        elif category in ("Liability", "Equity"):
+            financial_position["Liabilities & Equity"][mapping] = entry
+        else:
+            # Heuristic: positive → Asset, negative → Liability/Equity
+            if cy_val >= 0:
+                financial_position["Assets"][mapping] = entry
+            else:
+                financial_position["Liabilities & Equity"][mapping] = entry
+
+    # Notes: sub-mapping breakdown for expense accounts
     notes = {}
-    if not gaa_expenses.empty:
-        notes["General and administrative expenses"] = {}
-        grouped_sub = gaa_expenses.groupby('Sub Mapping')[['Amount-25']].sum()
-        for sub, row in grouped_sub.iterrows():
-            notes["General and administrative expenses"][sub] = float(row['Amount-25'])
-            
-    # 3. Calculate Totals
-    # Total Assets
-    total_assets = sum(item['Amount-25'] for item in financial_position['Assets'].values())
-    
-    # Total Liabilities & Equity
-    total_liab_equity = sum(item['Amount-25'] for item in financial_position['Liabilities & Equity'].values())
-    
-    # Net Profit/Loss (Revenue - Expenses)
-    # In a TB, Revenue is usually Credit (Negative) and Expenses are Debit (Positive).
-    # Profit = Revenue (abs) - Expenses
-    # OR simpler: Net P/L = Sum of all P&L accounts.
-    # In a balanced TB, Assets + Liab + Equity + Revenue + Expenses = 0
-    # So: Assets + Liab + Equity + (Net Profit implied in Retained Earnings if closed, or separate if not) = 0
-    # Let's assume standard P&L items are those NOT in Assets/Liab/Equity if those are explicitly defined?
-    # Actually, simpler: Sum of everything usually = 0.
-    # Net Profit from P/L items: Sum of Revenue (neg) + Expenses (pos). 
-    # Result: If Negative -> Net Profit (Credit balance), If Positive -> Net Loss.
-    # Visual check: Revenue (-50k) + Exp (40k) = -10k (Profit of 10k).
-    # The user asks: "Verified logic: Revenue - Expenses".
-    # Let's calculate purely based on what is NOT Asset/Liab/Equity? 
-    # Or rely on specific "Revenue" and "Expense" keywords in Mapping?
-    # Let's look for "Revenue" and "Expense" in Main Mapping.
-    
-    pnl_df = df[df['Main Mapping'].str.contains('Revenue|Expense', case=False, na=False)]
-    # Revenue is credit (-), Exp is debit (+). 
-    # Net Profit = Total Revenue (positive number) - Total Expenses (positive number).
-    # So we need to flip signs for Revenue if it's stored as negative.
-    
-    # Let's do:
-    # Revenue_Rows = Main Mapping contains 'Revenue'
-    # Expense_Rows = Main Mapping contains 'Expense'
-    
-    rev_mask = df['Main Mapping'].str.contains('Revenue', case=False, na=False)
-    exp_mask = df['Main Mapping'].str.contains('Expense', case=False, na=False)
-    
-    # Sum current year
-    revenue_sum = float(df[rev_mask]['Amount-25'].sum()) # Likely negative
-    expense_sum = float(df[exp_mask]['Amount-25'].sum()) # Likely positive
-    
-    # Net Profit = (Revenue * -1) - Expense (if revenue is neg)
-    # Actually, standard formula: Net Profit = Revenue - Expenses.
-    # If Revenue is -50k (Credit) and Expense is 40k (Debit). Sum is -10k. 
-    # Usually -10k implies Profit to be moved to Retained Earnings (Credit).
-    # Let's report the absolute value of Profit, or the signed value?
-    # "Net Profit/Loss for the period (Revenue - Expenses)" suggests user wants the magnitude/direction.
-    # Let's calculate: Abs(Revenue) - Abs(Expenses) ? 
-    # Or just -(Revenue + Expenses) to get positive Profit?
-    # Let's stick to: Profit = -(Sum of P&L items).
-    
+    if sub_col and sub_col in df.columns:
+        expense_rows = df[df[name_col].str.contains("expense", case=False, na=False)]
+        if not expense_rows.empty:
+            for main_name in expense_rows[name_col].unique():
+                sub_df = expense_rows[expense_rows[name_col] == main_name]
+                if sub_col in sub_df.columns:
+                    sub_grouped = sub_df.groupby(sub_col)[cy_col].sum()
+                    notes[main_name] = {
+                        str(k): float(v) for k, v in sub_grouped.items()
+                    }
+
+    # Totals
+    total_assets = sum(v["current"] for v in financial_position["Assets"].values())
+    total_liab_equity = sum(
+        v["current"] for v in financial_position["Liabilities & Equity"].values()
+    )
+
+    rev_mask = df[name_col].str.contains("revenue", case=False, na=False)
+    exp_mask = df[name_col].str.contains("expense", case=False, na=False)
+    revenue_sum = float(df[rev_mask][cy_col].sum())
+    expense_sum = float(df[exp_mask][cy_col].sum())
     net_profit = -(revenue_sum + expense_sum)
 
-    # Construct Final Output
-    output = {
+    return {
         "Financial Position": financial_position,
         "Notes": notes,
         "Totals": {
             "Total Assets": total_assets,
             "Total Liabilities & Equity": total_liab_equity,
-            "Net Profit/Loss": net_profit
-        }
+            "Net Profit/Loss": net_profit,
+        },
+        "_column_map": col_map,
     }
-    
-    return output
+
 
 if __name__ == "__main__":
-    import json
-    data = load_and_process_data("trial_balance.xlsx")
+    import sys
+
+    path = sys.argv[1] if len(sys.argv) > 1 else "trial_balance.xlsx"
+    data = load_and_process_data(path)
     if data:
-        print(json.dumps(data, indent=4))
+        print(json.dumps(data, indent=2, default=str))

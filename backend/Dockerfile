@@ -1,24 +1,25 @@
 FROM python:3.12-slim
 
-# Install LaTeX and other dependencies
-RUN apt-get update && apt-get install -y \
-    texlive-latex-base \
-    texlive-latex-recommended \
-    texlive-fonts-recommended \
-    texlive-latex-extra \
+# Install system dependencies:
+# - LibreOffice: DOCX→PDF conversion (primary, format-preserving)
+# - texlive: LaTeX fallback compilation
+# - fonts: proper rendering of accounting documents
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice \
+    libreoffice-writer \
+    fonts-liberation \
+    fonts-dejavu \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy dependency files
 COPY pyproject.toml .
-RUN pip install .
+RUN pip install --no-cache-dir .
 
-# Copy source code
 COPY . .
 
-# Create temp data directory
-RUN mkdir -p temp_data
+RUN mkdir -p temp_data templates
 
 EXPOSE 8000
 
