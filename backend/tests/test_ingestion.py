@@ -1,6 +1,6 @@
 import pytest
 import pandas as pd
-from backend import ingestion
+import ingestion
 from unittest.mock import MagicMock, patch
 
 def test_load_and_process_data_basic():

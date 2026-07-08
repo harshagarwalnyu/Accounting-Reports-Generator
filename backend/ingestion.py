@@ -44,7 +44,13 @@ def load_and_process_data(file_path, use_ai=False):
         "Liabilities & Equity": {}
     }
 
+    import re
+
     for mapping, row in grouped.iterrows():
+        # P&L accounts belong to the income statement, not the financial position;
+        # without this they fall through the sign heuristic into Assets/Liabilities.
+        if re.search(r"revenue|expense", str(mapping), re.IGNORECASE):
+            continue
         entry = {
             "Amount-25": float(row['Amount-25']),
             "Amount-24": float(row['Amount-24'])
