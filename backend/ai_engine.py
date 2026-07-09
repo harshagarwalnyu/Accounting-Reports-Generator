@@ -71,7 +71,8 @@ def ai_classify_accounts(accounts: list[str]) -> list[AccountMapping]:
         return [AccountMapping(account_name=a, category="Asset", confidence=0.5) for a in accounts]
 
     system_prompt = """You are a senior forensic accountant specializing in company liquidations.
-Classify each accounting line item into exactly one category: Asset, Liability, Equity, Revenue, or Expense.
+Classify each accounting line item into exactly one category:
+Asset, Liability, Equity, Revenue, or Expense.
 Sub-categories examples: Current Asset, Fixed Asset, Current Liability, Long-term Liability,
 Shareholders Equity, Operating Revenue, Direct Expense, Administrative Expense."""
 
