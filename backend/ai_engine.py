@@ -26,12 +26,8 @@ client = (
 
 class AccountMapping(BaseModel):
     account_name: str
-    category: str = Field(
-        description="One of: Asset, Liability, Equity, Revenue, Expense"
-    )
-    sub_category: str | None = Field(
-        default=None, description="Detailed classification"
-    )
+    category: str = Field(description="One of: Asset, Liability, Equity, Revenue, Expense")
+    sub_category: str | None = Field(default=None, description="Detailed classification")
     confidence: float
 
 
@@ -39,9 +35,7 @@ class FinancialAnalysis(BaseModel):
     liquidator_narrative: str = Field(
         description="Professional narrative for the liquidation report"
     )
-    key_observations: list[str] = Field(
-        description="Top 3-5 critical financial observations"
-    )
+    key_observations: list[str] = Field(description="Top 3-5 critical financial observations")
     risk_level: str = Field(description="Low, Medium, or High")
 
 
@@ -74,14 +68,12 @@ def extract_text_from_file(file_path: str) -> str:
 
 def ai_classify_accounts(accounts: list[str]) -> list[AccountMapping]:
     if client is None:
-        return [
-            AccountMapping(account_name=a, category="Asset", confidence=0.5)
-            for a in accounts
-        ]
+        return [AccountMapping(account_name=a, category="Asset", confidence=0.5) for a in accounts]
 
     system_prompt = """You are a senior forensic accountant specializing in company liquidations.
 Classify each accounting line item into exactly one category: Asset, Liability, Equity, Revenue, or Expense.
-Sub-categories examples: Current Asset, Fixed Asset, Current Liability, Long-term Liability, Shareholders Equity, Operating Revenue, Direct Expense, Administrative Expense."""
+Sub-categories examples: Current Asset, Fixed Asset, Current Liability, Long-term Liability,
+Shareholders Equity, Operating Revenue, Direct Expense, Administrative Expense."""
 
     tools = [
         {
@@ -145,10 +137,7 @@ Sub-categories examples: Current Asset, Fixed Asset, Current Liability, Long-ter
     except Exception as e:
         logger.warning("ai_classify_accounts failed (%s): %s", type(e).__name__, e)
 
-    return [
-        AccountMapping(account_name=a, category="Asset", confidence=0.5)
-        for a in accounts
-    ]
+    return [AccountMapping(account_name=a, category="Asset", confidence=0.5) for a in accounts]
 
 
 # ── Field identification (moved from template_engine.py) ─────────────────────
@@ -162,7 +151,9 @@ FIELD_SCHEMA = {
     "report_date": "date of this report",
     "liquidation_start_date": "date liquidation commenced",
     "period_end_date": "period end or financial year end date",
-    "liquidator_narrative": "professional narrative paragraph >50 words about the company's financial position, written in accounting/legal language — mark entire paragraph as liquidator_narrative",
+    "liquidator_narrative": "professional narrative paragraph >50 words about the company's "
+    "financial position, written in accounting/legal language — mark entire paragraph as "
+    "liquidator_narrative",
 }
 
 
@@ -206,10 +197,13 @@ def _ai_identify_fields(text_blocks: list[str]) -> dict[str, str]:
                     "type": "text",
                     "text": (
                         "You are an expert document analyst for accounting and legal reports. "
-                        "Given a list of text blocks extracted from a document, identify which blocks "
+                        "Given a list of text blocks extracted from a document, "
+                        "identify which blocks "
                         "contain dynamic per-client data matching the provided field schema. "
-                        "Any block longer than 50 words written in professional accounting or legal language "
-                        "about the company's financial status should be mapped to field_name 'liquidator_narrative'. "
+                        "Any block longer than 50 words written in professional "
+                        "accounting or legal language "
+                        "about the company's financial status should be mapped to "
+                        "field_name 'liquidator_narrative'. "
                         f"Field schema:\n{field_descriptions}"
                     ),
                     "cache_control": {"type": "ephemeral"},
@@ -247,7 +241,8 @@ def _ai_identify_fields(text_blocks: list[str]) -> dict[str, str]:
 def generate_dynamic_narrative(financial_summary: dict) -> FinancialAnalysis:
     if client is None:
         return FinancialAnalysis(
-            liquidator_narrative="The assets and liabilities of the company are as disclosed in the Statement of Financial Position.",
+            liquidator_narrative="The assets and liabilities of the company are as disclosed "
+            "in the Statement of Financial Position.",
             key_observations=[
                 "All assets have been verified",
                 "Outstanding liabilities are to be settled",
@@ -273,7 +268,8 @@ Never invent or assume any numbers not present in the data."""
                 "properties": {
                     "liquidator_narrative": {
                         "type": "string",
-                        "description": "Professional 2-3 sentence narrative for the liquidation report",
+                        "description": "Professional 2-3 sentence narrative "
+                        "for the liquidation report",
                     },
                     "key_observations": {
                         "type": "array",
@@ -301,7 +297,8 @@ Never invent or assume any numbers not present in the data."""
             messages=[
                 {
                     "role": "user",
-                    "content": f"Financial data:\n{json.dumps(financial_summary, indent=2, default=str)}",
+                    "content": "Financial data:\n"
+                    + json.dumps(financial_summary, indent=2, default=str),
                 }
             ],
         )
@@ -309,12 +306,11 @@ Never invent or assume any numbers not present in the data."""
             if block.type == "tool_use":
                 return FinancialAnalysis(**block.input)
     except Exception as e:
-        logger.warning(
-            "generate_dynamic_narrative failed (%s): %s", type(e).__name__, e
-        )
+        logger.warning("generate_dynamic_narrative failed (%s): %s", type(e).__name__, e)
 
     return FinancialAnalysis(
-        liquidator_narrative="The assets and liabilities of the company are as disclosed in the Statement of Financial Position.",
+        liquidator_narrative="The assets and liabilities of the company are as disclosed "
+        "in the Statement of Financial Position.",
         key_observations=[
             "All assets have been verified",
             "Outstanding liabilities are to be settled",

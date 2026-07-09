@@ -170,7 +170,8 @@ async def process_report(
         )
         if not financial_data:
             raise ValueError(
-                "Failed to parse Excel. Check column names — need account names and at least one amount column."
+                "Failed to parse Excel. Check column names — need account names "
+                "and at least one amount column."
             )
 
         jobs[job_id]["data"] = financial_data
@@ -247,9 +248,7 @@ async def process_report(
             )
             template_engine.delete_template(temp_tmpl_id)
             if not ok or not audit_pdf.exists():
-                raise Exception(
-                    "Audit PDF generation failed. Check LibreOffice is installed."
-                )
+                raise Exception("Audit PDF generation failed. Check LibreOffice is installed.")
             pdfs_to_merge.append(str(audit_pdf))
 
         # ── Liquidation report ────────────────────────────────────────────────
@@ -293,7 +292,8 @@ async def process_report(
             )
             if not meta:
                 raise Exception(
-                    "Failed to parse liquidation sample. Please check the file is a valid DOCX or PDF."
+                    "Failed to parse liquidation sample. "
+                    "Please check the file is a valid DOCX or PDF."
                 )
             jobs[job_id]["progress"].put_nowait(
                 {
@@ -320,7 +320,8 @@ async def process_report(
 
         if not pdfs_to_merge:
             raise Exception(
-                "No sample or template provided. Please upload at least one sample report or select a saved template."
+                "No sample or template provided. Please upload at least one sample "
+                "report or select a saved template."
             )
 
         jobs[job_id]["progress"].put_nowait(
@@ -344,9 +345,7 @@ async def process_report(
 
     except Exception as e:
         logger.exception(f"Error processing job {job_id}")
-        jobs[job_id]["progress"].put_nowait(
-            {"step": "error", "progress": 0, "message": str(e)}
-        )
+        jobs[job_id]["progress"].put_nowait({"step": "error", "progress": 0, "message": str(e)})
     finally:
         asyncio.create_task(cleanup_job_files(job_id))
 
@@ -385,23 +384,17 @@ async def generate_report(
 
     excel_ext = Path(file.filename).suffix.lower()
     if excel_ext not in ALLOWED_EXCEL_EXTENSIONS:
-        raise HTTPException(
-            400, f"Excel file required (.xlsx or .xls), got {excel_ext}"
-        )
+        raise HTTPException(400, f"Excel file required (.xlsx or .xls), got {excel_ext}")
 
     if sample_audit and sample_audit.filename:
         audit_ext = Path(sample_audit.filename).suffix.lower()
         if audit_ext not in ALLOWED_SAMPLE_EXTENSIONS:
-            raise HTTPException(
-                400, f"Audit sample must be PDF or DOCX, got {audit_ext}"
-            )
+            raise HTTPException(400, f"Audit sample must be PDF or DOCX, got {audit_ext}")
 
     if sample_liquidation and sample_liquidation.filename:
         liq_ext = Path(sample_liquidation.filename).suffix.lower()
         if liq_ext not in ALLOWED_SAMPLE_EXTENSIONS:
-            raise HTTPException(
-                400, f"Liquidation sample must be PDF or DOCX, got {liq_ext}"
-            )
+            raise HTTPException(400, f"Liquidation sample must be PDF or DOCX, got {liq_ext}")
 
     try:
         config_dict = json.loads(config)
@@ -418,18 +411,14 @@ async def generate_report(
 
     sample_audit_path = None
     if sample_audit and sample_audit.filename:
-        safe_name = "".join(
-            c for c in sample_audit.filename if c.isalnum() or c in "._-"
-        )
+        safe_name = "".join(c for c in sample_audit.filename if c.isalnum() or c in "._-")
         sample_audit_path = TMP_DIR / f"tmp_{job_id}_audit_{safe_name}"
         audit_contents = await sample_audit.read()
         await asyncio.to_thread(sample_audit_path.write_bytes, audit_contents)
 
     sample_liquidation_path = None
     if sample_liquidation and sample_liquidation.filename:
-        safe_name = "".join(
-            c for c in sample_liquidation.filename if c.isalnum() or c in "._-"
-        )
+        safe_name = "".join(c for c in sample_liquidation.filename if c.isalnum() or c in "._-")
         sample_liquidation_path = TMP_DIR / f"tmp_{job_id}_liq_{safe_name}"
         liq_contents = await sample_liquidation.read()
         await asyncio.to_thread(sample_liquidation_path.write_bytes, liq_contents)
@@ -480,9 +469,7 @@ async def get_pdf(job_id: str):
     pdf_path = Path(jobs[job_id]["pdf"])
     if not pdf_path.exists():
         raise HTTPException(404, "PDF file missing")
-    return FileResponse(
-        pdf_path, media_type="application/pdf", filename=f"Report_{job_id}.pdf"
-    )
+    return FileResponse(pdf_path, media_type="application/pdf", filename=f"Report_{job_id}.pdf")
 
 
 @app.get("/api/reports/{job_id}/data")

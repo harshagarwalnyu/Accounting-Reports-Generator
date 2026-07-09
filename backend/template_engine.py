@@ -277,9 +277,7 @@ def _compare_fingerprints(template_fp: dict, filled_fp: dict) -> list[str]:
                 zip(t_row.get("cells", []), f_row.get("cells", []))
             ):
                 if t_cell.get("tcPr_hash") != f_cell.get("tcPr_hash"):
-                    issues.append(
-                        f"table {table_idx} row {r_idx} cell {c_idx}: tcPr changed"
-                    )
+                    issues.append(f"table {table_idx} row {r_idx} cell {c_idx}: tcPr changed")
     return issues
 
 
@@ -561,9 +559,7 @@ class DocumentFormatVerifier:
     SSIM_THRESHOLD = 0.92
     MAX_ITERATIONS = 3
 
-    def verify(
-        self, template_docx: str, filled_docx: str, template_fingerprint: dict
-    ) -> dict:
+    def verify(self, template_docx: str, filled_docx: str, template_fingerprint: dict) -> dict:
         logger.info("GVR active at tier 1 (vision tiers gated by ENABLE_VISION_VERIFY env)")
 
         # ── Tier 1: XML fingerprint diff ──────────────────────────────────────
@@ -604,7 +600,8 @@ class DocumentFormatVerifier:
             diffs = _claude_vision_diff(template_pages[idx], filled_pages[idx], issue_hint=hint)
             tier3_issues.extend(diffs)
 
-        # Remove "IDENTICAL" entries — pages that looked different by SSIM but Claude agrees are fine
+        # Remove "IDENTICAL" entries — pages that looked different by SSIM
+        # but the reviewer model agrees are fine
         tier3_issues = [d for d in tier3_issues if d != "IDENTICAL"]
 
         if tier3_issues:
@@ -683,9 +680,7 @@ def _find_financial_tables(doc) -> list[dict]:
     for i, table in enumerate(doc.tables):
         if len(table.columns) < 2:
             continue
-        all_text = " ".join(
-            cell.text for row in table.rows for cell in row.cells
-        ).lower()
+        all_text = " ".join(cell.text for row in table.rows for cell in row.cells).lower()
 
         if not re.search(r"\d{3,}", all_text):
             continue
@@ -761,17 +756,14 @@ def create_template(
     # Step 3a: Direct replacement using known values from config
     if known_values:
         field_map = {
-            "company_name": known_values.get("Company_Name")
-            or known_values.get("company_name"),
+            "company_name": known_values.get("Company_Name") or known_values.get("company_name"),
             "address": known_values.get("Address") or known_values.get("address"),
             "license_number": known_values.get("License_Number")
             or known_values.get("license_number"),
-            "manager_name": known_values.get("Manager_Name")
-            or known_values.get("manager_name"),
+            "manager_name": known_values.get("Manager_Name") or known_values.get("manager_name"),
             "liquidator_name": known_values.get("Liquidator_Name")
             or known_values.get("liquidator_name"),
-            "report_date": known_values.get("Report_Date")
-            or known_values.get("report_date"),
+            "report_date": known_values.get("Report_Date") or known_values.get("report_date"),
             "liquidation_start_date": known_values.get("Liquidation_Start_Date"),
             "period_end_date": known_values.get("Period_End_Date"),
         }
@@ -963,9 +955,7 @@ def _fill_financial_position_table(
 
     if expected_order:
         known_order = {name: i for i, name in enumerate(expected_order)}
-        known = sorted(
-            [a for a in all_accounts if a in known_order], key=lambda x: known_order[x]
-        )
+        known = sorted([a for a in all_accounts if a in known_order], key=lambda x: known_order[x])
         new_accts = [a for a in all_accounts if a not in known_order]
         ordered_names = known + new_accts
     else:
@@ -975,9 +965,7 @@ def _fill_financial_position_table(
     for name in ordered_names:
         amounts = all_accounts.get(name, {})
         if isinstance(amounts, dict):
-            new_rows.append(
-                [name, _fmt(amounts.get("current", 0)), _fmt(amounts.get("prior", 0))]
-            )
+            new_rows.append([name, _fmt(amounts.get("current", 0)), _fmt(amounts.get("prior", 0))])
         else:
             new_rows.append([name, _fmt(amounts), ""])
 
@@ -1099,9 +1087,7 @@ def fill_and_generate(
     value_map = _build_value_map(config)
     if narrative and "liquidator_narrative" in metadata.get("applied_replacements", {}).values():
         value_map["liquidator_narrative"] = narrative.liquidator_narrative
-        value_map["key_observations"] = "\n".join(
-            f"• {obs}" for obs in narrative.key_observations
-        )
+        value_map["key_observations"] = "\n".join(f"• {obs}" for obs in narrative.key_observations)
         value_map["risk_level"] = narrative.risk_level
 
     # Step 2: Use docxtpl for Jinja2-style {{field}} replacement

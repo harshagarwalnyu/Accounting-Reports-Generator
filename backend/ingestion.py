@@ -88,9 +88,15 @@ def _ai_detect_columns(df: pd.DataFrame) -> dict:
                 "properties": {
                     "name_col": {"type": "string", "description": "Account names column"},
                     "cy_col": {"type": "string", "description": "Current year amounts column"},
-                    "py_col": {"type": ["string", "null"], "description": "Prior year amounts column"},
+                    "py_col": {
+                        "type": ["string", "null"],
+                        "description": "Prior year amounts column",
+                    },
                     "sub_col": {"type": ["string", "null"], "description": "Sub-category column"},
-                    "category_col": {"type": ["string", "null"], "description": "Category/type column"},
+                    "category_col": {
+                        "type": ["string", "null"],
+                        "description": "Category/type column",
+                    },
                 },
                 "required": ["name_col", "cy_col"],
             },
@@ -203,8 +209,7 @@ def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
 
     if not name_col or not cy_col:
         logger.error(
-            f"Cannot identify required columns. Detected: {col_map}. "
-            f"Available: {list(df.columns)}"
+            f"Cannot identify required columns. Detected: {col_map}. Available: {list(df.columns)}"
         )
         return None
 
@@ -240,9 +245,7 @@ def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
 
         mapping_lower = str(mapping).lower()
         # Exclude P&L items from Statement of Financial Position if they match keywords
-        if any(
-            kw in mapping_lower for kw in ["revenue", "expense", "income", "cost of"]
-        ):
+        if any(kw in mapping_lower for kw in ["revenue", "expense", "income", "cost of"]):
             continue
 
         category = ai_map.get(mapping)
@@ -266,9 +269,7 @@ def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
                 sub_df = expense_rows[expense_rows[name_col] == main_name]
                 if sub_col in sub_df.columns:
                     sub_grouped = sub_df.groupby(sub_col)[cy_col].sum()
-                    notes[main_name] = {
-                        str(k): float(v) for k, v in sub_grouped.items()
-                    }
+                    notes[main_name] = {str(k): float(v) for k, v in sub_grouped.items()}
 
     # Totals
     total_assets = sum(v["current"] for v in financial_position["Assets"].values())
