@@ -38,6 +38,7 @@ dev = [
 [tool.setuptools]
 py-modules = []
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 cache_dir = "/tmp/pytest_cache"
 pythonpath = ["."]
 
