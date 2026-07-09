@@ -7,29 +7,48 @@ import { Progress } from "@/components/ui/progress";
 import { CheckCircle2, Circle, Loader2, ArrowRight } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Button } from "@/components/ui/button";
+import { useEffect } from "react";
+import { API_BASE_URL } from "@/lib/api";
 
-const STEPS = [
-  "uploading",
-  "validating",
-  "processing",
-  "generating",
-  "compiling",
-  "done"
-];
+const STEPS = ["uploading", "generating", "compiling", "done"];
 
-const STEP_LABELS = {
-  uploading: "Uploading Trial Balance",
-  validating: "Validating Accounts",
-  processing: "Processing Financial Data",
-  generating: "Generating LaTeX Source",
+const STEP_LABELS: Record<string, string> = {
+  uploading: "Processing Trial Balance",
+  generating: "Generating Report Document",
   compiling: "Compiling PDF",
-  done: "Report Ready"
+  done: "Report Ready",
 };
 
 export default function GeneratingPage() {
   const { id } = useParams() as { id: string };
   const router = useRouter();
   const { events, isComplete, error } = useSSE(id);
+
+  // Fallback: If we get an error or on mount, check if the report is already done
+  useEffect(() => {
+    const checkStatus = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/reports/${id}/data`);
+        if (res.ok) {
+          router.push(`/reports/${id}`);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    
+    if (error) {
+      checkStatus();
+    }
+  }, [error, id, router, isComplete]);
+
+  // Auto-redirect when done
+  useEffect(() => {
+    if (isComplete) {
+      const t = setTimeout(() => router.push(`/reports/${id}`), 2500);
+      return () => clearTimeout(t);
+    }
+  }, [isComplete, id, router]);
 
   const currentEvent = events[events.length - 1];
   const progressValue = currentEvent?.progress || 0;
@@ -39,7 +58,7 @@ export default function GeneratingPage() {
     <div className="max-w-3xl mx-auto py-12 space-y-8">
       <div className="text-center space-y-4">
         <h1 className="text-3xl font-bold tracking-tight">Generating Report</h1>
-        <p className="text-muted-foreground">Please wait while we process your financial data and generate the LaTeX PDF.</p>
+        <p className="text-muted-foreground">Please wait while we process your financial data and generate the report document.</p>
       </div>
 
       <Card className="glass-card overflow-hidden">
