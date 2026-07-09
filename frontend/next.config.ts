@@ -1,9 +1,18 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",       // smaller Docker image if containerized
-  compress: true,             // gzip responses
-  poweredByHeader: false,     // remove X-Powered-By header
+  output: "standalone",
+  compress: true,
+  poweredByHeader: false,
+  async rewrites() {
+    const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000";
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${backendUrl}/api/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

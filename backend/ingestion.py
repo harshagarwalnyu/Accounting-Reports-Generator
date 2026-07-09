@@ -70,48 +70,69 @@ def _match_column(df_cols, candidates):
 
 
 def _ai_detect_columns(df: pd.DataFrame) -> dict:
-    """Use Gemini to detect column purposes from a preview of the DataFrame."""
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
+    """Use Claude to detect column purposes from a preview of the DataFrame."""
+    from ai_engine import SONNET, client
+
+    if client is None:
         return {}
+
+    preview_rows = df.head(4).fillna("").to_dict(orient="records")
+    col_list = list(df.columns)
+
+    tools = [
+        {
+            "name": "detect_columns",
+            "description": "Identify which column serves each role in a trial balance spreadsheet",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_col": {"type": "string", "description": "Account names column"},
+                    "cy_col": {"type": "string", "description": "Current year amounts column"},
+                    "py_col": {"type": ["string", "null"], "description": "Prior year amounts column"},
+                    "sub_col": {"type": ["string", "null"], "description": "Sub-category column"},
+                    "category_col": {"type": ["string", "null"], "description": "Category/type column"},
+                },
+                "required": ["name_col", "cy_col"],
+            },
+        }
+    ]
 
     try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=api_key)
-        from ai_engine import GEMINI_MODEL
-
-        model = genai.GenerativeModel(GEMINI_MODEL)
-
-        preview_rows = df.head(4).fillna("").to_dict(orient="records")
-        col_list = list(df.columns)
-
-        prompt = f"""You are analyzing an accounting trial balance Excel file.
-Column names: {col_list}
-First 4 rows sample:
-{json.dumps(preview_rows, default=str, indent=2)}
-
-Identify which column serves each role:
-- name_col: account names or line item descriptions
-- cy_col: current year monetary amounts (most recent year)
-- py_col: prior year monetary amounts (if present)
-- sub_col: sub-category or sub-mapping (if present)
-- category_col: account category or type (if present)
-
-Return ONLY valid JSON like:
-{{"name_col": "...", "cy_col": "...", "py_col": null, "sub_col": null, "category_col": null}}"""
-
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0,
-            },
+        response = client.messages.create(
+            model=SONNET,
+            max_tokens=512,
+            system=[
+                {
+                    "type": "text",
+                    "text": (
+                        "You are a data analyst identifying which columns in a trial-balance "
+                        "spreadsheet serve which role (account name, current-year amount, "
+                        "prior-year amount, sub-category, category). Always respond via the "
+                        "detect_columns tool. Never invent column names — use only those provided."
+                    ),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            tools=tools,
+            tool_choice={"type": "tool", "name": "detect_columns"},
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"Column names: {col_list}\n"
+                        f"First 4 rows sample:\n{json.dumps(preview_rows, default=str)}\n"
+                        "Identify which column serves each role in this trial balance."
+                    ),
+                }
+            ],
         )
-        return json.loads(response.text.strip())
+        for block in response.content:
+            if block.type == "tool_use":
+                return block.input
     except Exception as e:
-        logger.error(f"AI column detection failed: {e}")
-        return {}
+        logger.error("AI column detection failed (%s): %s", type(e).__name__, e)
+
+    return {}
 
 
 def detect_columns(df: pd.DataFrame) -> dict:
@@ -143,10 +164,32 @@ def detect_columns(df: pd.DataFrame) -> dict:
 
 def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
     try:
-        df = pd.read_excel(file_path)
+        xl = pd.ExcelFile(file_path)
     except Exception as e:
-        logger.error(f"Error loading Excel: {e}")
+        logger.error("Error loading Excel: %s", e)
         return None
+
+    if len(xl.sheet_names) == 1:
+        try:
+            df = xl.parse(xl.sheet_names[0])
+        except Exception as e:
+            logger.error("Error parsing Excel: %s", e)
+            return None
+    else:
+        valid_dfs = []
+        for sheet in xl.sheet_names:
+            try:
+                sheet_df = xl.parse(sheet)
+                col_map = detect_columns(sheet_df)
+                if col_map.get("name_col") and col_map.get("cy_col"):
+                    sheet_df["_sheet_hint"] = sheet
+                    valid_dfs.append(sheet_df)
+            except Exception as e:
+                logger.warning("Skipping sheet %r: %s", sheet, e)
+        if not valid_dfs:
+            logger.error("No valid sheets found with recognized columns")
+            return None
+        df = pd.concat(valid_dfs, ignore_index=True)
 
     if df.empty:
         logger.error("Excel file is empty")
@@ -174,7 +217,7 @@ def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
         df[py_col] = pd.to_numeric(df[py_col], errors="coerce").fillna(0)
 
     # AI account classification
-    if use_ai and ai_engine and os.environ.get("GEMINI_API_KEY"):
+    if use_ai and ai_engine and os.environ.get("ANTHROPIC_API_KEY"):
         unique_mappings = df[name_col].unique().tolist()
         ai_mappings = ai_engine.ai_classify_accounts(unique_mappings)
         ai_map = {m.account_name: m.category for m in ai_mappings}
@@ -188,8 +231,6 @@ def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
     grouped = df.groupby(name_col).agg(agg_cols)
 
     financial_position = {"Assets": {}, "Liabilities & Equity": {}}
-
-    import re
 
     for mapping, row in grouped.iterrows():
         cy_val = float(row[cy_col])
@@ -219,7 +260,7 @@ def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
     # Notes: sub-mapping breakdown for expense accounts
     notes = {}
     if sub_col and sub_col in df.columns:
-        expense_rows = df[df[name_col].str.contains("expense", case=False, na=False)]
+        expense_rows = df[df[name_col].astype(str).str.contains("expense", case=False, na=False)]
         if not expense_rows.empty:
             for main_name in expense_rows[name_col].unique():
                 sub_df = expense_rows[expense_rows[name_col] == main_name]
@@ -235,8 +276,8 @@ def load_and_process_data(file_path: str, use_ai: bool = False) -> dict | None:
         v["current"] for v in financial_position["Liabilities & Equity"].values()
     )
 
-    rev_mask = df[name_col].str.contains("revenue", case=False, na=False)
-    exp_mask = df[name_col].str.contains("expense", case=False, na=False)
+    rev_mask = df[name_col].astype(str).str.contains("revenue", case=False, na=False)
+    exp_mask = df[name_col].astype(str).str.contains("expense", case=False, na=False)
     revenue_sum = float(df[rev_mask][cy_col].sum())
     expense_sum = float(df[exp_mask][cy_col].sum())
     net_profit = -(revenue_sum + expense_sum)

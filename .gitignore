@@ -114,6 +114,9 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+backend/.env
 .venv
 env/
 venv/
@@ -172,3 +175,20 @@ frontend/node_modules/
 temp_data/
 .temp_venv/
 .gemini/
+
+# Graphify
+graphify-out/cache/
+
+# Local tooling & scratch
+.mcp.json
+.serena/
+.claudeignore
+fix_gemini_skills.sh
+setup_gemini_auth.sh
+test_gemini.sh
+backend/create_sample_report.py
+backend/test_generate.py
+backend/test_trial_balance.py
+*.pdf
+*.docx
+test_trial_balance.xlsx

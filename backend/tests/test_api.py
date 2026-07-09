@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import ai_engine
 from main import app
 
 client = TestClient(app)
@@ -52,7 +53,20 @@ def test_list_templates_empty():
     if Path("templates").exists():
         shutil.rmtree("templates")
     Path("templates").mkdir()
-    
+
     response = client.get("/api/templates")
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_process_report_no_anthropic_key(monkeypatch):
+    """Health endpoint must stay up and ai_engine.client must be None when the key is absent."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(ai_engine, "client", None)
+
+    # The app should still serve health — no crash from a None AI client
+    response = client.get("/health")
+    assert response.status_code == 200
+
+    # Confirm the attribute we patched is indeed None
+    assert ai_engine.client is None

@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from pypdf import PdfWriter
 from sse_starlette.sse import EventSourceResponse
 
+import ai_engine
 import ingestion
 import template_engine
 
@@ -155,7 +156,7 @@ async def process_report(
     liquidation_template_id: str | None = None,
 ):
     try:
-        use_ai = bool(os.environ.get("GEMINI_API_KEY"))
+        use_ai = bool(os.environ.get("ANTHROPIC_API_KEY"))
         jobs[job_id]["progress"].put_nowait(
             {
                 "step": "uploading",
@@ -173,6 +174,16 @@ async def process_report(
             )
 
         jobs[job_id]["data"] = financial_data
+
+        narrative = None
+        if ai_engine.client is not None:
+            try:
+                narrative = await asyncio.to_thread(
+                    ai_engine.generate_dynamic_narrative, financial_data
+                )
+            except Exception as e:
+                logger.warning("Narrative generation failed: %s", e)
+
         pdfs_to_merge = []
 
         # ── Audit report ──────────────────────────────────────────────────────
@@ -193,6 +204,7 @@ async def process_report(
                 config_data,
                 financial_data,
                 str(audit_pdf),
+                narrative=narrative,
             )
             if ok and audit_pdf.exists():
                 pdfs_to_merge.append(str(audit_pdf))
@@ -231,6 +243,7 @@ async def process_report(
                 config_data,
                 financial_data,
                 str(audit_pdf),
+                narrative=narrative,
             )
             template_engine.delete_template(temp_tmpl_id)
             if not ok or not audit_pdf.exists():
@@ -257,6 +270,7 @@ async def process_report(
                 config_data,
                 financial_data,
                 str(liq_pdf),
+                narrative=narrative,
             )
             if ok and liq_pdf.exists():
                 pdfs_to_merge.append(str(liq_pdf))
@@ -295,6 +309,7 @@ async def process_report(
                 config_data,
                 financial_data,
                 str(liq_pdf),
+                narrative=narrative,
             )
             template_engine.delete_template(temp_tmpl_id)
             if not ok or not liq_pdf.exists():
@@ -364,6 +379,9 @@ async def generate_report(
 ):
     ALLOWED_EXCEL_EXTENSIONS = {".xlsx", ".xls"}
     ALLOWED_SAMPLE_EXTENSIONS = {".pdf", ".docx", ".doc"}
+
+    if not file.filename:
+        raise HTTPException(400, "Trial balance file must have a filename")
 
     excel_ext = Path(file.filename).suffix.lower()
     if excel_ext not in ALLOWED_EXCEL_EXTENSIONS:

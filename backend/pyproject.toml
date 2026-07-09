@@ -13,13 +13,19 @@ dependencies = [
     "python-multipart>=0.0.22",
     "sse-starlette>=3.3.2",
     "uvicorn>=0.41.0",
-    "google-generativeai>=0.8.0",
+    "anthropic>=0.40.0",
+    "pymupdf>=1.25.0",
+    "scikit-image>=0.25.0",
+    "imagehash>=4.3.2",
+    "Pillow>=11.0.0",
+    "babel>=2.16.0",
     "pypdf>=4.0.0",
     "python-docx>=1.1.0",
     "docxtpl>=0.16.0",
     "pdfplumber>=0.11.0",
     "lxml>=5.0.0",
     "python-dotenv>=1.0.0",
+    "tenacity>=8.2.0",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +37,10 @@ dev = [
 
 [tool.setuptools]
 py-modules = []
+[tool.pytest.ini_options]
+cache_dir = "/tmp/pytest_cache"
+pythonpath = ["."]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

@@ -32,12 +32,12 @@ export default function GeneratingPage() {
         if (res.ok) {
           router.push(`/reports/${id}`);
         }
-      } catch (e) {
+      } catch {
         // ignore
       }
     };
     
-    if (error || !isComplete) {
+    if (error) {
       checkStatus();
     }
   }, [error, id, router, isComplete]);

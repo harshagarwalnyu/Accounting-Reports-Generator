@@ -20,12 +20,15 @@ Generation:
     → LibreOffice headless → PDF
 """
 
+import copy
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import zipfile
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +38,13 @@ from docx.table import _Row as TableRow
 logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path("templates")
+
+try:
+    from ai_engine import _ai_identify_fields
+except ImportError:
+
+    def _ai_identify_fields(text_blocks: list[str]) -> dict[str, str]:
+        return {}
 
 
 def _ensure_templates_dir():
@@ -56,7 +66,7 @@ def _replace_in_paragraph(para, old_text: str, new_text: str) -> bool:
             return True
 
     # Slow path: text is split across runs — merge into first run
-    # NOTE: merging runs destroys individual run formatting (bold, italic, etc.) 
+    # NOTE: merging runs destroys individual run formatting (bold, italic, etc.)
     # except for the first run's style. This is acceptable for template creation phase.
     full = "".join(r.text for r in para.runs)
     if old_text in full:
@@ -131,7 +141,7 @@ def _insert_data_row(table, template_row, cell_values: list[str], anchor=None):
             for child in list(para_el):
                 if child.tag != f"{{{W}}}pPr":
                     para_el.remove(child)
-            
+
             # Find rPr from THIS cell's first run (not the whole row)
             cell_runs = cell_el.findall(f".//{{{W}}}r")
             rPr_copy = None
@@ -139,7 +149,7 @@ def _insert_data_row(table, template_row, cell_values: list[str], anchor=None):
                 rPr = cell_runs[0].find(f"{{{W}}}rPr")
                 if rPr is not None:
                     rPr_copy = deepcopy(rPr)
-            
+
             # Add new run
             r_el = etree.SubElement(para_el, f"{{{W}}}r")
             if rPr_copy is not None:
@@ -173,61 +183,457 @@ def _extract_text_blocks(doc) -> list[str]:
     return blocks
 
 
-def _ai_identify_fields(text_blocks: list[str]) -> dict[str, str]:
+# ── OOXML fidelity helpers ────────────────────────────────────────────────────
+
+
+def _is_total_row(text: str) -> bool:
+    return any(kw in text.lower() for kw in ["total", "net profit", "net loss"])
+
+
+def _freeze_tbl_look(table) -> None:
+    """Set all tblLook flags to 0 to prevent conditional format overrides on new rows."""
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    tblPr = table._tbl.find(qn("w:tblPr"))
+    if tblPr is None:
+        return
+    tblLook = tblPr.find(qn("w:tblLook"))
+    if tblLook is None:
+        tblLook = etree.SubElement(tblPr, qn("w:tblLook"))
+    for attr in [
+        "w:firstRow",
+        "w:lastRow",
+        "w:firstColumn",
+        "w:lastColumn",
+        "w:noHBand",
+        "w:noVBand",
+    ]:
+        tblLook.set(qn(attr), "0")
+
+
+def _enforce_fixed_layout(table) -> None:
+    """Set tblLayout to fixed to prevent column width drift when rows are added/removed."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    tblPr = table._tbl.find(qn("w:tblPr"))
+    if tblPr is None:
+        return
+    tblLayout = tblPr.find(qn("w:tblLayout"))
+    if tblLayout is None:
+        tblLayout = OxmlElement("w:tblLayout")
+        tblPr.append(tblLayout)
+    tblLayout.set(qn("w:type"), "fixed")
+
+
+def _xml_hash(element) -> str | None:
+    if element is None:
+        return None
+    from lxml import etree
+
+    return hashlib.md5(etree.tostring(element, canonical=True)).hexdigest()
+
+
+def _extract_table_fingerprint(table) -> dict:
+    from docx.oxml.ns import qn
+
+    fp: dict = {"rows": []}
+    for row in table.rows:
+        row_fp: dict = {"trPr_hash": _xml_hash(row._tr.find(qn("w:trPr"))), "cells": []}
+        for cell in row.cells:
+            rPr_el = None
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                rPr_el = cell.paragraphs[0].runs[0]._r.find(qn("w:rPr"))
+            row_fp["cells"].append(
+                {
+                    "tcPr_hash": _xml_hash(cell._tc.find(qn("w:tcPr"))),
+                    "rPr_hash": _xml_hash(rPr_el),
+                }
+            )
+        fp["rows"].append(row_fp)
+    return fp
+
+
+def _extract_layout_fingerprint(docx_path: str) -> dict:
+    from docx import Document
+
+    doc = Document(docx_path)
+    return {str(i): _extract_table_fingerprint(t) for i, t in enumerate(doc.tables)}
+
+
+def _compare_fingerprints(template_fp: dict, filled_fp: dict) -> list[str]:
+    issues = []
+    for table_idx, tbl_fp in template_fp.items():
+        if table_idx not in filled_fp:
+            issues.append(f"table {table_idx}: missing in filled doc")
+            continue
+        for r_idx, (t_row, f_row) in enumerate(
+            zip(tbl_fp.get("rows", []), filled_fp[table_idx].get("rows", []))
+        ):
+            if t_row.get("trPr_hash") != f_row.get("trPr_hash"):
+                issues.append(f"table {table_idx} row {r_idx}: trPr changed")
+            for c_idx, (t_cell, f_cell) in enumerate(
+                zip(t_row.get("cells", []), f_row.get("cells", []))
+            ):
+                if t_cell.get("tcPr_hash") != f_cell.get("tcPr_hash"):
+                    issues.append(
+                        f"table {table_idx} row {r_idx} cell {c_idx}: tcPr changed"
+                    )
+    return issues
+
+
+def _clone_row_preserve_format(table, source_row_idx: int):
+    """Deep-clone a row, clear all text, and append to the table."""
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    source_tr = table.rows[source_row_idx]._tr
+    new_tr = copy.deepcopy(source_tr)
+    for tc in new_tr.findall(qn("w:tc")):
+        for para in tc.findall(qn("w:p")):
+            for run in para.findall(qn("w:r")):
+                para.remove(run)
+            r = etree.SubElement(para, qn("w:r"))
+            t = etree.SubElement(r, qn("w:t"))
+            t.text = ""
+    table._tbl.append(new_tr)
+    return table.rows[-1]
+
+
+def _set_cell_text_preserve_rpr(cell, text: str) -> None:
+    """Set cell text while preserving existing run formatting (rPr)."""
+    from docx.oxml.ns import qn
+
+    para = cell.paragraphs[0]
+    existing_rPr = None
+    if para.runs:
+        existing_rPr = copy.deepcopy(para.runs[0]._r.find(qn("w:rPr")))
+        para.clear()
+    run = para.add_run(text)
+    if existing_rPr is not None:
+        existing = run._r.find(qn("w:rPr"))
+        if existing is not None:
+            run._r.remove(existing)
+        run._r.insert(0, existing_rPr)
+
+
+def _replace_floating_images(docx_path: str, image_replacements: dict[str, bytes]) -> None:
+    """Replace floating image binary data without touching anchor XML."""
+    docx_path = Path(docx_path)
+    tmp_dir = docx_path.parent / (docx_path.stem + "_unzipped")
+    with zipfile.ZipFile(docx_path, "r") as z:
+        z.extractall(tmp_dir)
+    media_dir = tmp_dir / "word" / "media"
+    for img_name, img_bytes in image_replacements.items():
+        target = media_dir / img_name
+        if target.exists():
+            target.write_bytes(img_bytes)
+    output_path = docx_path.parent / (docx_path.stem + "_fixed.docx")
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for file in tmp_dir.rglob("*"):
+            if file.is_file():
+                zout.write(file, file.relative_to(tmp_dir))
+    shutil.rmtree(tmp_dir)
+    output_path.replace(docx_path)
+
+
+def _format_accounting_number(value: float, pattern: dict) -> str:
+    try:
+        from babel.numbers import format_decimal
+
+        currency = pattern.get("currency", "")
+        decimals = pattern.get("decimals", 2)
+        negative_parens = pattern.get("negative", "parens") == "parens"
+        if currency == "AED":
+            if value < 0 and negative_parens:
+                return f"AED ({abs(value):,.{decimals}f})"
+            return f"AED {value:,.{decimals}f}"
+        return format_decimal(
+            value,
+            format=pattern.get("babel_format", "#,##0.00"),
+            locale=pattern.get("locale", "en_AE"),
+        )
+    except Exception:
+        return _fmt(value)
+
+
+# ── GVR helpers — render & compare ───────────────────────────────────────────
+
+
+def _render_docx_to_pngs(docx_path: str, dpi: int = 150) -> list[bytes]:
+    """Convert a DOCX to a list of per-page PNG byte strings via LibreOffice + PyMuPDF.
+
+    Fails open: returns [] on any error so the caller can skip vision verification
+    rather than blocking document generation.
     """
-    Ask Gemini to identify which text blocks are dynamic company-specific data.
-    Returns {original_text: field_name}.
-    """
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return {}
+    import tempfile
 
     try:
-        import google.generativeai as genai
+        import fitz  # PyMuPDF
 
-        from ai_engine import GEMINI_MODEL
+        docx_path_obj = Path(docx_path)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_dir_path = Path(tmp_dir)
+            # LibreOffice writes <stem>.pdf into the outdir
+            subprocess.run(
+                [
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(tmp_dir_path),
+                    str(docx_path_obj),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=True,
+            )
+            pdf_file = tmp_dir_path / (docx_path_obj.stem + ".pdf")
+            if not pdf_file.exists():
+                logger.warning("_render_docx_to_pngs: PDF not found at %s", pdf_file)
+                return []
 
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(GEMINI_MODEL)
-
-        field_schema = {
-            "company_name": "company or entity name",
-            "address": "company address or registered office",
-            "license_number": "trade license, CR number, or registration number",
-            "manager_name": "director, manager, or authorized officer name",
-            "liquidator_name": "liquidator or appointed professional name",
-            "report_date": "date of this report",
-            "liquidation_start_date": "date liquidation commenced",
-            "period_end_date": "period end or financial year end date",
-        }
-
-        blocks_str = "\n".join(f"- {b}" for b in text_blocks[:80])
-
-        prompt = f"""You are analyzing text blocks from an accounting report document.
-Identify which blocks contain company-specific data that changes per client.
-
-Field types:
-{json.dumps(field_schema, indent=2)}
-
-Text blocks:
-{blocks_str}
-
-Return a JSON object mapping exact text → field_name.
-Only include blocks that clearly match a field type.
-Exclude financial amounts, table column headers, and standard boilerplate.
-Output ONLY valid JSON."""
-
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0,
-            },
-        )
-        return json.loads(response.text.strip())
+            mat = fitz.Matrix(dpi / 72, dpi / 72)
+            pages: list[bytes] = []
+            with fitz.open(str(pdf_file)) as pdf_doc:
+                for page in pdf_doc:
+                    pix = page.get_pixmap(matrix=mat)
+                    pages.append(pix.tobytes("png"))
+            return pages
+    except FileNotFoundError:
+        logger.warning("_render_docx_to_pngs: LibreOffice not found")
+        return []
     except Exception as e:
-        logger.error(f"AI field identification failed: {e}")
-        return {}
+        logger.warning("_render_docx_to_pngs failed: %s", e)
+        return []
+
+
+def _ssim_score(png_a: bytes, png_b: bytes) -> float:
+    """Return the structural similarity score between two PNG byte strings.
+
+    Resizes B to match A if dimensions differ. Returns 0.0 on any error.
+    """
+    try:
+        import io
+
+        import numpy as np
+        from PIL import Image
+        from skimage.metrics import structural_similarity
+
+        img_a = Image.open(io.BytesIO(png_a)).convert("RGB")
+        img_b = Image.open(io.BytesIO(png_b)).convert("RGB")
+
+        if img_a.size != img_b.size:
+            img_b = img_b.resize(img_a.size, Image.LANCZOS)
+
+        arr_a = np.array(img_a)
+        arr_b = np.array(img_b)
+
+        score, _ = structural_similarity(arr_a, arr_b, channel_axis=-1, data_range=255, full=True)
+        return float(score)
+    except Exception as e:
+        logger.warning("_ssim_score failed: %s", e)
+        return 0.0
+
+
+def _claude_vision_diff(png_a: bytes, png_b: bytes, issue_hint: str = "") -> list[str]:
+    """Ask Claude to identify visual differences between two page renders.
+
+    Returns a list of difference strings, or a sentinel error string on failure.
+    The caller is responsible for filtering out 'IDENTICAL' entries.
+    """
+    try:
+        import base64
+
+        import ai_engine
+
+        if ai_engine.client is None:
+            return ["tier3_skipped: no Claude client"]
+
+        b64_a = base64.b64encode(png_a).decode()
+        b64_b = base64.b64encode(png_b).decode()
+
+        tools = [
+            {
+                "name": "report_differences",
+                "description": "Report visual differences between two document renders.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "differences": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "List of visual differences. Use the single string "
+                                "'IDENTICAL' as the only element if there are no differences."
+                            ),
+                        }
+                    },
+                    "required": ["differences"],
+                },
+            }
+        ]
+
+        response = ai_engine.client.messages.create(
+            model=ai_engine.SONNET,
+            max_tokens=1024,
+            system=(
+                "You compare two renders of the same document page. "
+                "Identify visual differences that would bother a reader of a professional "
+                "accounting report: misaligned text, missing cells, wrong colors, missing logos, "
+                "overflowing columns. Report only differences, not similarities. "
+                "If no differences, output the single phrase 'IDENTICAL'."
+            ),
+            tools=tools,
+            tool_choice={"type": "tool", "name": "report_differences"},
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Render A is the template, Render B is the filled output."
+                                + (f" Hint: {issue_hint}" if issue_hint else "")
+                            ),
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": b64_a,
+                            },
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": b64_b,
+                            },
+                        },
+                    ],
+                }
+            ],
+        )
+
+        for block in response.content:
+            if block.type == "tool_use":
+                return block.input.get("differences", [])
+        return []
+    except Exception as e:
+        logger.warning("_claude_vision_diff failed: %s", e)
+        return [f"tier3_error: {e}"]
+
+
+# ── GVR (Generate-Verify-Repair) ─────────────────────────────────────────────
+
+
+def _restore_cell_tcpr_from_template(doc, template_docx_path: str, issue: str) -> None:
+    from docx import Document as _Doc
+    from docx.oxml.ns import qn
+
+    m = re.search(r"table (\d+) row (\d+) cell (\d+): tcPr changed", issue)
+    if not m:
+        return
+    t_idx, r_idx, c_idx = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        tmpl_doc = _Doc(template_docx_path)
+        if t_idx >= len(tmpl_doc.tables) or t_idx >= len(doc.tables):
+            return
+        tmpl_cells = tmpl_doc.tables[t_idx].rows[r_idx].cells
+        fill_tc = doc.tables[t_idx].rows[r_idx].cells[c_idx]._tc
+        tmpl_tcPr = tmpl_cells[c_idx]._tc.find(qn("w:tcPr"))
+        existing = fill_tc.find(qn("w:tcPr"))
+        if existing is not None:
+            fill_tc.remove(existing)
+        if tmpl_tcPr is not None:
+            fill_tc.insert(0, copy.deepcopy(tmpl_tcPr))
+    except Exception as e:
+        logger.warning("_restore_cell_tcpr_from_template failed: %s", e)
+
+
+class DocumentFormatVerifier:
+    SSIM_THRESHOLD = 0.92
+    MAX_ITERATIONS = 3
+
+    def verify(
+        self, template_docx: str, filled_docx: str, template_fingerprint: dict
+    ) -> dict:
+        logger.info("GVR active at tier 1 (vision tiers gated by ENABLE_VISION_VERIFY env)")
+
+        # ── Tier 1: XML fingerprint diff ──────────────────────────────────────
+        if template_fingerprint:
+            filled_fp = _extract_layout_fingerprint(filled_docx)
+            issues = _compare_fingerprints(template_fingerprint, filled_fp)
+            if issues:
+                return {"pass": False, "tier": 1, "issues": issues}
+
+        if not os.environ.get("ENABLE_VISION_VERIFY"):
+            return {"pass": True, "tier": 1, "issues": []}
+
+        # ── Tier 2: SSIM visual comparison ───────────────────────────────────
+        template_pages = _render_docx_to_pngs(template_docx)
+        filled_pages = _render_docx_to_pngs(filled_docx)
+
+        if not template_pages or not filled_pages:
+            logger.warning(
+                "GVR Tier 2: render returned empty list — skipping vision verify (fail-open)"
+            )
+            return {"pass": True, "tier": 1, "issues": []}
+
+        ssim_issues: list[tuple[int, float]] = []  # (page_idx, score)
+        for idx, (tpng, fpng) in enumerate(zip(template_pages, filled_pages)):
+            score = _ssim_score(tpng, fpng)
+            if score < self.SSIM_THRESHOLD:
+                ssim_issues.append((idx, score))
+                if len(ssim_issues) >= 2:  # cap at 2 pages to bound Claude cost
+                    break
+
+        if not ssim_issues:
+            return {"pass": True, "tier": 2, "issues": []}
+
+        # ── Tier 3: Claude vision diff for SSIM-failing pages ─────────────────
+        tier3_issues: list[str] = []
+        for idx, score in ssim_issues:
+            hint = f"page {idx}, ssim={score:.3f}"
+            diffs = _claude_vision_diff(template_pages[idx], filled_pages[idx], issue_hint=hint)
+            tier3_issues.extend(diffs)
+
+        # Remove "IDENTICAL" entries — pages that looked different by SSIM but Claude agrees are fine
+        tier3_issues = [d for d in tier3_issues if d != "IDENTICAL"]
+
+        if tier3_issues:
+            return {"pass": False, "tier": 3, "issues": tier3_issues}
+        return {"pass": True, "tier": 3, "issues": []}
+
+    def repair(
+        self,
+        filled_docx: str,
+        template_docx: str,
+        template_fp: dict,
+        issues: list[str],
+    ) -> str:
+        from docx import Document
+
+        doc = Document(filled_docx)
+        repaired = False
+        for issue in issues:
+            if "tcPr changed" in issue:
+                _restore_cell_tcpr_from_template(doc, template_docx, issue)
+                repaired = True
+            else:
+                # Tier 2/3 issues (SSIM failures, Claude-reported differences) need human review.
+                logger.warning("No automated repair handler for: %s", issue)
+        if not repaired:
+            return filled_docx
+        repaired_path = filled_docx.replace(".docx", "_r.docx")
+        doc.save(repaired_path)
+        return repaired_path
 
 
 # ── Template creation ─────────────────────────────────────────────────────────
@@ -247,7 +653,6 @@ def _pdf_text_to_docx(pdf_path: Path, docx_path: Path):
         from docx import Document
 
         doc = Document()
-        # Try pdfplumber first (preserves table structure better)
         try:
             import pdfplumber
 
@@ -387,7 +792,44 @@ def create_template(
     # Step 4: Identify financial tables
     financial_tables = _find_financial_tables(doc)
 
+    # Step 5: OOXML fidelity — freeze table formatting and capture fingerprints
+    table_fingerprints: dict = {}
+    number_format_patterns: dict = {}
+    for t_info in financial_tables:
+        t_idx = t_info["table_index"]
+        if t_idx >= len(doc.tables):
+            continue
+        table = doc.tables[t_idx]
+        _freeze_tbl_look(table)
+        _enforce_fixed_layout(table)
+        expected_order = [
+            row.cells[0].text.strip()
+            for row in table.rows
+            if row.cells and not _is_total_row(row.cells[0].text)
+        ]
+        t_info["expected_account_order"] = expected_order
+        table_fingerprints[str(t_idx)] = _extract_table_fingerprint(table)
+        pattern: dict = {"decimals": 2, "negative": "parens"}
+        for row in table.rows:
+            for cell in row.cells:
+                if "aed" in cell.text.lower():
+                    pattern["currency"] = "AED"
+                    break
+        number_format_patterns[str(t_idx)] = pattern
+
     doc.save(str(template_docx))
+
+    # Step 6: Catalog floating images by filename
+    image_catalog: dict = {}
+    try:
+        with zipfile.ZipFile(str(template_docx), "r") as z:
+            for name in z.namelist():
+                if name.startswith("word/media/"):
+                    img_name = name.split("/")[-1]
+                    if img_name:
+                        image_catalog[img_name] = "unknown"
+    except Exception as e:
+        logger.warning("Image catalog extraction failed: %s", e)
 
     metadata = {
         "template_id": template_id,
@@ -395,6 +837,9 @@ def create_template(
         "original_filename": sample_path.name,
         "applied_replacements": applied,
         "financial_tables": financial_tables,
+        "table_fingerprints": table_fingerprints,
+        "image_catalog": image_catalog,
+        "number_format_patterns": number_format_patterns,
         "created_at": datetime.now().isoformat(),
     }
     with open(template_dir / "metadata.json", "w") as f:
@@ -412,14 +857,12 @@ def _build_value_map(config: dict) -> dict[str, str]:
     dates = config.get("Dates", {})
     sigs = config.get("Signatories", {})
     report_date = dates.get("Report Date", "")
-    
-    from datetime import datetime
+
     current_year = datetime.now().year
     cy_year = str(current_year)
     py_year = str(current_year - 1)
-    
+
     try:
-        # Try to parse from various common formats
         dt = None
         for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"]:
             try:
@@ -450,7 +893,12 @@ def _build_value_map(config: dict) -> dict[str, str]:
     }
 
 
-def _fill_financial_position_table(table, financial_position: dict, totals: dict):
+def _fill_financial_position_table(
+    table,
+    financial_position: dict,
+    totals: dict,
+    expected_order: list | None = None,
+):
     """
     Rebuild a financial position table with actual line items.
     Identifies data rows (vs header/total rows), removes them, inserts new rows
@@ -505,23 +953,33 @@ def _fill_financial_position_table(table, financial_position: dict, totals: dict
     # Capture style BEFORE deletion
     style_row = rows[data_indices[0]]
 
-    # Determine insertion point (after last header)
-    last_header_idx = max(header_indices) if header_indices else 0
-    anchor_row = rows[last_header_idx]
-
-    # Collect new data
+    # Collect and order new data
     assets = financial_position.get("Assets", {})
     liab_equity = financial_position.get("Liabilities & Equity", {})
 
+    all_accounts: dict = {}
+    all_accounts.update(assets)
+    all_accounts.update(liab_equity)
+
+    if expected_order:
+        known_order = {name: i for i, name in enumerate(expected_order)}
+        known = sorted(
+            [a for a in all_accounts if a in known_order], key=lambda x: known_order[x]
+        )
+        new_accts = [a for a in all_accounts if a not in known_order]
+        ordered_names = known + new_accts
+    else:
+        ordered_names = list(assets.keys()) + list(liab_equity.keys())
+
     new_rows: list[list[str]] = []
-    for name, amounts in assets.items():
-        new_rows.append(
-            [name, _fmt(amounts.get("current", 0)), _fmt(amounts.get("prior", 0))]
-        )
-    for name, amounts in liab_equity.items():
-        new_rows.append(
-            [name, _fmt(amounts.get("current", 0)), _fmt(amounts.get("prior", 0))]
-        )
+    for name in ordered_names:
+        amounts = all_accounts.get(name, {})
+        if isinstance(amounts, dict):
+            new_rows.append(
+                [name, _fmt(amounts.get("current", 0)), _fmt(amounts.get("prior", 0))]
+            )
+        else:
+            new_rows.append([name, _fmt(amounts), ""])
 
     # Remove old data rows
     tbl = table._tbl
@@ -612,6 +1070,8 @@ def fill_and_generate(
     config: dict,
     financial_data: dict,
     output_pdf_path: str,
+    narrative=None,
+    image_replacements: dict[str, bytes] | None = None,
 ) -> bool:
     """
     Generate a filled PDF from a stored template.
@@ -635,19 +1095,24 @@ def fill_and_generate(
     working_docx = Path(output_pdf_path).with_suffix(".docx")
     shutil.copy(template_docx, working_docx)
 
-    # Step 1: Use docxtpl for Jinja2-style {{field}} replacement
-    # docxtpl handles split runs natively — no manual run merging needed
+    # Step 1: Build value map and inject narrative if provided
     value_map = _build_value_map(config)
+    if narrative and "liquidator_narrative" in metadata.get("applied_replacements", {}).values():
+        value_map["liquidator_narrative"] = narrative.liquidator_narrative
+        value_map["key_observations"] = "\n".join(
+            f"• {obs}" for obs in narrative.key_observations
+        )
+        value_map["risk_level"] = narrative.risk_level
+
+    # Step 2: Use docxtpl for Jinja2-style {{field}} replacement
     try:
         from docxtpl import DocxTemplate
 
         tpl = DocxTemplate(str(working_docx))
-        # docxtpl context must not include keys that collide with Jinja2 builtins
         safe_context = {k: str(v) for k, v in value_map.items()}
         tpl.render(safe_context)
         tpl.save(str(working_docx))
     except Exception as e:
-        # Fallback to manual replacement if docxtpl fails
         logger.warning(f"docxtpl render failed ({e}), using manual replacement")
         from docx import Document as _Doc
 
@@ -656,7 +1121,7 @@ def fill_and_generate(
             _replace_in_doc(doc_fb, f"{{{{{field}}}}}", str(value))
         doc_fb.save(str(working_docx))
 
-    # Step 2: Rebuild financial tables with actual data (preserves table styling)
+    # Step 3: Rebuild financial tables with actual data (preserves table styling)
     financial_position = financial_data.get("Financial Position", {})
     totals = financial_data.get("Totals", {})
     notes = financial_data.get("Notes", {})
@@ -671,12 +1136,51 @@ def fill_and_generate(
             ttype = t_info.get("table_type", "")
             if ttype == "financial_position":
                 _fill_financial_position_table(
-                    doc.tables[t_idx], financial_position, totals
+                    doc.tables[t_idx],
+                    financial_position,
+                    totals,
+                    expected_order=t_info.get("expected_account_order"),
                 )
             elif ttype == "notes":
                 _fill_notes_table(doc.tables[t_idx], notes)
 
     doc.save(str(working_docx))
+
+    # Step 3b: Replace floating image binaries (logos, signatures) if provided.
+    # Only swaps files matched by name in metadata["image_catalog"]; anchor XML untouched.
+    if image_replacements:
+        catalog = metadata.get("image_catalog", {})
+        valid = {name: data for name, data in image_replacements.items() if name in catalog}
+        if valid:
+            try:
+                _replace_floating_images(str(working_docx), valid)
+            except Exception as e:
+                logger.warning("Floating image replacement failed: %s", e)
+
+    # Step 4: GVR Tier 1 — XML fingerprint verify-and-repair loop
+    template_fingerprint = metadata.get("table_fingerprints", {})
+    if template_fingerprint:
+        verifier = DocumentFormatVerifier()
+        working_str = str(working_docx)
+        for iteration in range(verifier.MAX_ITERATIONS):
+            result = verifier.verify(str(template_docx), working_str, template_fingerprint)
+            if result["pass"]:
+                break
+            logger.info(
+                "Format iteration %d: %d issues at tier %d",
+                iteration + 1,
+                len(result["issues"]),
+                result["tier"],
+            )
+            repaired = verifier.repair(
+                working_str, str(template_docx), template_fingerprint, result["issues"]
+            )
+            if repaired != working_str:
+                working_docx = Path(repaired)
+                working_str = repaired
+            else:
+                break
+
     return _docx_to_pdf(working_docx, Path(output_pdf_path))
 
 
